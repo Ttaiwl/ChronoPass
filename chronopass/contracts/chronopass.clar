@@ -1,4 +1,4 @@
-;; ChronoPass: Dynamic NFT Subscription System
+;; ChronoPass: Dynamic NFT Subscription System with Enhanced Transfers
 
 ;; Constants and Settings
 (define-constant contract-owner tx-sender)
@@ -13,6 +13,8 @@
 (define-constant err-subscription-exists (err u103))
 (define-constant err-insufficient-funds (err u104))
 (define-constant err-invalid-duration (err u105))
+(define-constant err-transfer-not-allowed (err u106))
+(define-constant err-transfer-expired (err u107))
 
 ;; NFT Definition
 (define-non-fungible-token chronopass uint)
@@ -97,7 +99,7 @@
       end-time: end-time,
       tier: tier,
       auto-renewal: false,
-      features: (list u1 u2 u3)
+      features: (list u1 u2 u3)  ;; Default features
     })
     (var-set nft-counter token-id)
     (ok token-id)
@@ -135,6 +137,43 @@
   ))
 )
 
+;; Enhanced Transfer Function
+(define-public (transfer-subscription 
+  (token-id uint) 
+  (sender principal) 
+  (recipient principal)
+  (transfer-features bool)
+)
+  (let (
+    (sub-data (unwrap! (map-get? subscriptions token-id) err-invalid-params))
+    (current-owner (get owner sub-data))
+    (is-current-subscription-active (is-active sub-data))
+  )
+  (begin
+    ;; Validate transfer conditions
+    (asserts! (is-eq current-owner sender) err-unauthorized)
+    (asserts! is-current-subscription-active err-transfer-expired)
+    (asserts! (not (is-eq recipient tx-sender)) err-transfer-not-allowed)
+    
+    ;; Transfer the NFT
+    (try! (nft-transfer? chronopass token-id sender recipient))
+    
+    ;; Update subscription with transfer rules
+    (map-set subscriptions token-id
+      (merge sub-data {
+        owner: recipient,
+        auto-renewal: false,  ;; Always disable auto-renewal on transfer
+        features: (if transfer-features 
+                    (get features sub-data)  ;; Keep original features
+                    (list)  ;; Reset features if transfer-features is false
+        )
+      })
+    )
+    
+    (ok true)
+  ))
+)
+
 ;; Read-Only Functions
 (define-read-only (get-subscription (token-id uint))
   (let (
@@ -156,27 +195,45 @@
   )))
 )
 
-;; NFT Transfer Implementation
-(define-public (transfer (token-id uint) (sender principal) (recipient principal))
+;; Enhanced Ownership Verification
+(define-read-only (verify-subscription-ownership 
+  (token-id uint) 
+  (expected-owner principal)
+)
   (let (
     (sub-data (unwrap! (map-get? subscriptions token-id) err-invalid-params))
+    (current-owner (get owner sub-data))
   )
-  (begin
-    (asserts! (is-eq (get owner sub-data) sender) err-unauthorized)
-    (try! (nft-transfer? chronopass token-id sender recipient))
-    (ok (map-set subscriptions token-id
-      (merge sub-data {
-        owner: recipient,
-        auto-renewal: false
-      })
-    ))
-  ))
+  (ok (is-eq current-owner expected-owner))
+))
+
+;; Public Function to Verify Subscription State for Off-Chain Services
+(define-read-only (verify-subscription-access 
+  (token-id uint)
+  (feature-id uint)
+)
+  (let (
+    (sub-data (unwrap! (map-get? subscriptions token-id) err-invalid-params))
+    (is-subscription-valid (is-active sub-data))
+  )
+  (ok {
+    is-active: is-subscription-valid,
+    owner: (get owner sub-data),
+    has-feature: (is-some (index-of (get features sub-data) feature-id))
+  }))
 )
 
+;; Legacy Transfer Function (for compatibility)
+(define-public (transfer (token-id uint) (sender principal) (recipient principal))
+  (transfer-subscription token-id sender recipient false)
+)
+
+;; NFT Owner Retrieval
 (define-read-only (get-owner (token-id uint))
   (ok (get owner (unwrap! (map-get? subscriptions token-id) err-invalid-params)))
 )
 
+;; Token URI (currently returns none, can be expanded later)
 (define-read-only (get-token-uri (token-id uint))
   (ok none)
 )
